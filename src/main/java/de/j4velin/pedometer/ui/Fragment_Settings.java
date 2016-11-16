@@ -78,7 +78,7 @@ public class Fragment_Settings extends PreferenceFragment implements OnPreferenc
                     public boolean onPreferenceChange(final Preference preference,
                                                       final Object newValue) {
                         getActivity().getSharedPreferences("pedometer", Context.MODE_PRIVATE).edit()
-                                .putBoolean("notification", (Boolean) newValue).commit();
+                                .putBoolean("notification", (Boolean) newValue).apply();
 
                         getActivity().startService(new Intent(getActivity(), SensorListener.class)
                                 .putExtra(SensorListener.ACTION_UPDATE_NOTIFICATION, true));
@@ -170,7 +170,7 @@ public class Fragment_Settings extends PreferenceFragment implements OnPreferenc
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
                         np.clearFocus();
-                        prefs.edit().putInt("goal", np.getValue()).commit();
+                        prefs.edit().putInt("goal", np.getValue()).apply();
                         preference.setSummary(getString(R.string.goal_summary, np.getValue()));
                         dialog.dismiss();
                         getActivity().startService(new Intent(getActivity(), SensorListener.class)

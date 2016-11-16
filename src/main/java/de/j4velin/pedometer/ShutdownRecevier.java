@@ -16,27 +16,32 @@
 
 package de.j4velin.pedometer;
 
+import android.annotation.SuppressLint;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 
 import de.j4velin.pedometer.util.Logger;
 import de.j4velin.pedometer.util.Util;
 
 public class ShutdownRecevier extends BroadcastReceiver {
 
+    @SuppressLint("CommitPrefEdits")
     @Override
     public void onReceive(final Context context, final Intent intent) {
         if (BuildConfig.DEBUG) Logger.log("shutting down");
 
-        context.startService(new Intent(context, SensorListener.class));
+        context.startService(
+                new Intent(context, SensorListener.class).setAction(SensorListener.FORCE_UPDATE));
 
         // if the user used a root script for shutdown, the DEVICE_SHUTDOWN
         // broadcast might not be send. Therefore, the app will check this
         // setting on the next boot and displays an error message if it's not
         // set to true
-        context.getSharedPreferences("pedometer", Context.MODE_PRIVATE).edit()
-                .putBoolean("correctShutdown", true).commit();
+        SharedPreferences.Editor edit =
+                context.getSharedPreferences("pedometer", Context.MODE_PRIVATE).edit();
+        edit.putBoolean("correctShutdown", true);
 
         Database db = Database.getInstance(context);
         // if it's already a new day, add the temp. steps to the last one
@@ -48,14 +53,14 @@ public class ShutdownRecevier extends BroadcastReceiver {
             db.insertNewDay(Util.getToday(), steps - pauseDifference);
             if (pauseDifference > 0) {
                 // update pauseCount for the new day
-                context.getSharedPreferences("pedometer", Context.MODE_PRIVATE).edit()
-                        .putInt("pauseCount", steps).commit();
+                edit.putInt("pauseCount", steps);
             }
         } else {
             db.addToLastEntry(db.getCurrentSteps());
         }
         // current steps will be reset on boot @see BootReceiver
         db.close();
+        edit.commit();
     }
 
 }

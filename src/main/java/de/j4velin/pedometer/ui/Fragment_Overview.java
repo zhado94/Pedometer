@@ -238,7 +238,7 @@ public class Fragment_Overview extends Fragment implements SensorEventListener {
                 d.setColorFilter(Color.WHITE, PorterDuff.Mode.SRC_ATOP);
                 item.setIcon(d);
                 getActivity().startService(new Intent(getActivity(), SensorListener.class)
-                        .putExtra("action", SensorListener.ACTION_PAUSE));
+                        .setAction(SensorListener.ACTION_PAUSE));
                 return true;
             default:
                 return ((Activity_Main) getActivity()).optionsItemSelected(item);

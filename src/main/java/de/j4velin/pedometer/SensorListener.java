@@ -50,13 +50,18 @@ public class SensorListener extends Service implements SensorEventListener {
     private final static int NOTIFICATION_ID = 1;
 
     public final static String ACTION_PAUSE = "pause";
+    public final static String FORCE_UPDATE = "update";
 
-    private static boolean WAIT_FOR_VALID_STEPS = false;
     private static int steps;
 
     private final static int MICROSECONDS_IN_ONE_MINUTE = 60000000;
+    private final static long THRESHOLD_UPDATE_MS = 60 * 60 * 1000;
+    private final static int THRESHOLD_UPDATE_STEPS = 1000;
 
     public final static String ACTION_UPDATE_NOTIFICATION = "updateNotificationState";
+
+    private static long lastUpdateTime;
+    private static int lastUpdateSteps;
 
     @Override
     public void onAccuracyChanged(final Sensor sensor, int accuracy) {
@@ -67,32 +72,49 @@ public class SensorListener extends Service implements SensorEventListener {
 
     @Override
     public void onSensorChanged(final SensorEvent event) {
-        if (event.values[0] > Integer.MAX_VALUE) {
+        if (event.values[0] > Integer.MAX_VALUE || event.values[0] <= 0) {
             if (BuildConfig.DEBUG) Logger.log("probably not a real value: " + event.values[0]);
-            return;
         } else {
             steps = (int) event.values[0];
-            if (WAIT_FOR_VALID_STEPS && steps > 0) {
-                WAIT_FOR_VALID_STEPS = false;
-                Database db = Database.getInstance(this);
-                if (db.getSteps(Util.getToday()) == Integer.MIN_VALUE) {
-                    int pauseDifference = steps -
-                            getSharedPreferences("pedometer", Context.MODE_PRIVATE)
-                                    .getInt("pauseCount", steps);
-                    db.insertNewDay(Util.getToday(), steps - pauseDifference);
-                    if (pauseDifference > 0) {
-                        // update pauseCount for the new day
-                        getSharedPreferences("pedometer", Context.MODE_PRIVATE).edit()
-                                .putInt("pauseCount", steps).commit();
-                    }
-                    reRegisterSensor();
-                }
-                db.saveCurrentSteps(steps);
-                db.close();
-                updateNotificationState();
-                startService(new Intent(this, WidgetUpdateService.class));
+            if (needUpdate()) {
+                saveAndUpdate();
             }
         }
+    }
+
+    /**
+     * Checks if we need to update the widget & notification.
+     * Updates should happen if the last update is older then {@link #THRESHOLD_UPDATE_MS} ms or if
+     * we walked more then {@link #THRESHOLD_UPDATE_STEPS} steps since the last update
+     *
+     * @return true, if an update should happen now
+     */
+    private static boolean needUpdate() {
+        return steps - lastUpdateSteps > THRESHOLD_UPDATE_STEPS ||
+                System.currentTimeMillis() - lastUpdateTime > THRESHOLD_UPDATE_MS;
+    }
+
+    /**
+     * Saves the step value in the database and updates notification & widget
+     */
+    private void saveAndUpdate() {
+        lastUpdateSteps = steps;
+        lastUpdateTime = System.currentTimeMillis();
+        Database db = Database.getInstance(this);
+        if (db.getSteps(Util.getToday()) == Integer.MIN_VALUE) {
+            int pauseDifference = steps - getSharedPreferences("pedometer", Context.MODE_PRIVATE)
+                    .getInt("pauseCount", steps);
+            db.insertNewDay(Util.getToday(), steps - pauseDifference);
+            if (pauseDifference > 0) {
+                // update pauseCount for the new day
+                getSharedPreferences("pedometer", Context.MODE_PRIVATE).edit()
+                        .putInt("pauseCount", steps).apply();
+            }
+        }
+        db.saveCurrentSteps(steps);
+        db.close();
+        updateNotificationState();
+        startService(new Intent(this, WidgetUpdateService.class));
     }
 
     @Override
@@ -102,48 +124,40 @@ public class SensorListener extends Service implements SensorEventListener {
 
     @Override
     public int onStartCommand(final Intent intent, int flags, int startId) {
-        if (intent != null && ACTION_PAUSE.equals(intent.getStringExtra("action"))) {
-            if (BuildConfig.DEBUG)
-                Logger.log("onStartCommand action: " + intent.getStringExtra("action"));
-            if (steps == 0) {
-                Database db = Database.getInstance(this);
-                steps = db.getCurrentSteps();
-                db.close();
+        if (intent != null) {
+            if (BuildConfig.DEBUG) Logger.log("onStartCommand action: " + intent.getAction());
+            if (ACTION_PAUSE.equals(intent.getAction())) {
+                if (steps == 0) {
+                    Database db = Database.getInstance(this);
+                    steps = db.getCurrentSteps();
+                    db.close();
+                }
+                SharedPreferences prefs = getSharedPreferences("pedometer", Context.MODE_PRIVATE);
+                if (prefs.contains("pauseCount")) { // resume counting
+                    int difference = steps - prefs.getInt("pauseCount",
+                            steps); // number of steps taken during the pause
+                    Database db = Database.getInstance(this);
+                    db.addToLastEntry(-difference);
+                    db.close();
+                    prefs.edit().remove("pauseCount").apply();
+                    updateNotificationState();
+                } else { // pause counting
+                    prefs.edit().putInt("pauseCount", steps).apply();
+                    updateNotificationState();
+                    stopSelf();
+                    return START_NOT_STICKY;
+                }
+            } else if (FORCE_UPDATE.equals(intent.getAction())) {
+                if (steps > lastUpdateSteps) {
+                    saveAndUpdate();
+                }
             }
-            SharedPreferences prefs = getSharedPreferences("pedometer", Context.MODE_PRIVATE);
-            if (prefs.contains("pauseCount")) { // resume counting
-                int difference = steps -
-                        prefs.getInt("pauseCount", steps); // number of steps taken during the pause
-                Database db = Database.getInstance(this);
-                db.addToLastEntry(-difference);
-                db.close();
-                prefs.edit().remove("pauseCount").commit();
+
+            if (intent.getBooleanExtra(ACTION_UPDATE_NOTIFICATION, false)) {
                 updateNotificationState();
-            } else { // pause counting
-                // cancel restart
-                ((AlarmManager) getApplicationContext().getSystemService(Context.ALARM_SERVICE))
-                        .cancel(PendingIntent.getService(getApplicationContext(), 2,
-                                new Intent(this, SensorListener.class),
-                                PendingIntent.FLAG_UPDATE_CURRENT));
-                prefs.edit().putInt("pauseCount", steps).commit();
-                updateNotificationState();
-                stopSelf();
-                return START_NOT_STICKY;
             }
         }
-
-        // restart service every hour to get the current step count
-        ((AlarmManager) getApplicationContext().getSystemService(Context.ALARM_SERVICE))
-                .set(AlarmManager.RTC, System.currentTimeMillis() + AlarmManager.INTERVAL_HOUR,
-                        PendingIntent.getService(getApplicationContext(), 2,
-                                new Intent(this, SensorListener.class),
-                                PendingIntent.FLAG_UPDATE_CURRENT));
-
-        WAIT_FOR_VALID_STEPS = true;
-
-        if (intent != null && intent.getBooleanExtra(ACTION_UPDATE_NOTIFICATION, false)) {
-            updateNotificationState();
-        }
+        lastUpdateTime = 0; // update as soon as possible
 
         return START_STICKY;
     }
@@ -152,7 +166,7 @@ public class SensorListener extends Service implements SensorEventListener {
     public void onCreate() {
         super.onCreate();
         if (BuildConfig.DEBUG) Logger.log("SensorListener onCreate");
-        reRegisterSensor();
+        registerSensor();
         updateNotificationState();
     }
 
@@ -178,6 +192,10 @@ public class SensorListener extends Service implements SensorEventListener {
             e.printStackTrace();
         }
     }
+
+    /**
+     * Updates the notification, if enabled in settings
+     */
 
     private void updateNotificationState() {
         if (BuildConfig.DEBUG) Logger.log("SensorListener updateNotificationState");
@@ -214,8 +232,8 @@ public class SensorListener extends Service implements SensorEventListener {
                     .setSmallIcon(R.drawable.ic_notification)
                     .addAction(isPaused ? R.drawable.ic_resume : R.drawable.ic_pause,
                             isPaused ? getString(R.string.resume) : getString(R.string.pause),
-                            PendingIntent.getService(this, 4, new Intent(this, SensorListener.class)
-                                            .putExtra("action", ACTION_PAUSE),
+                            PendingIntent.getService(this, 4,
+                                    new Intent(this, SensorListener.class).setAction(ACTION_PAUSE),
                                     PendingIntent.FLAG_UPDATE_CURRENT)).setOngoing(true);
             nm.notify(NOTIFICATION_ID, notificationBuilder.build());
         } else {
@@ -223,12 +241,15 @@ public class SensorListener extends Service implements SensorEventListener {
         }
     }
 
-    private void reRegisterSensor() {
+    /**
+     * Registers the sensor listener
+     */
+    private void registerSensor() {
         if (BuildConfig.DEBUG) Logger.log("re-register sensor listener");
         SensorManager sm = (SensorManager) getSystemService(SENSOR_SERVICE);
         try {
             sm.unregisterListener(this);
-        } catch (Exception e) {
+        } catch (Throwable e) {
             if (BuildConfig.DEBUG) Logger.log(e);
             e.printStackTrace();
         }
